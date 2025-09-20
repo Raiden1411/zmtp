@@ -154,6 +154,7 @@ pub const quotable_printable = struct {
     // Start at 0...75 = 76 for the RFC Max line length.
     const MAX_LINE_LENGTH = 75;
 
+    /// States in the encoding process.
     const State = enum {
         seen_space,
         seen_r,
@@ -164,6 +165,7 @@ pub const quotable_printable = struct {
         start,
     };
 
+    /// Uses the writer as the output to print the encoded slice.
     pub fn encodeWriter(out: *Writer, slice: []const u8) Writer.Error!void {
         var current_len: usize = 0;
         var index: usize = 0;
@@ -226,34 +228,24 @@ pub const quotable_printable = struct {
                         index += 1;
                     },
                 },
-                .seen_r => {
-                    if (index + 1 == trimmed.len) {
+                .seen_r => switch (trimmed[index + 1]) {
+                    '\n' => {
+                        state = .seen_rn;
+                        continue;
+                    },
+                    else => {
+                        const available = MAX_LINE_LENGTH - current_len;
+                        if (available > 3) {
+                            current_len += 2;
+                        } else {
+                            try out.writeAll("=\r\n");
+                            current_len = 2;
+                        }
+
                         try out.print("={X:02}", .{trimmed[index]});
                         state = .start;
                         index += 1;
-
-                        continue;
-                    }
-
-                    switch (trimmed[index + 1]) {
-                        '\n' => {
-                            state = .seen_rn;
-                            continue;
-                        },
-                        else => {
-                            const available = MAX_LINE_LENGTH - current_len;
-                            if (available > 3) {
-                                current_len += 2;
-                            } else {
-                                try out.writeAll("=\r\n");
-                                current_len = 2;
-                            }
-
-                            try out.print("={X:02}", .{trimmed[index]});
-                            state = .start;
-                            index += 1;
-                        },
-                    }
+                    },
                 },
                 .seen_rn => {
                     if (current_len != MAX_LINE_LENGTH) {
@@ -267,37 +259,27 @@ pub const quotable_printable = struct {
                     state = .start;
                     index += 2;
                 },
-                .seen_space => {
-                    if (index + 1 == trimmed.len) {
-                        try out.print("={X:02}", .{trimmed[index]});
+                .seen_space => switch (trimmed[index + 1]) {
+                    '\r' => {
+                        state = .seen_r_space;
+                        continue;
+                    },
+                    '\n' => {
+                        state = .seen_n_space;
+                        continue;
+                    },
+                    else => {
+                        if (current_len != MAX_LINE_LENGTH) {
+                            current_len += 1;
+                        } else {
+                            try out.writeAll("=\r\n");
+                            current_len = 0;
+                        }
+
+                        try out.writeByte(trimmed[index]);
                         state = .start;
                         index += 1;
-
-                        continue;
-                    }
-
-                    switch (trimmed[index + 1]) {
-                        '\r' => {
-                            state = .seen_r_space;
-                            continue;
-                        },
-                        '\n' => {
-                            state = .seen_n_space;
-                            continue;
-                        },
-                        else => {
-                            if (current_len != MAX_LINE_LENGTH) {
-                                current_len += 1;
-                            } else {
-                                try out.writeAll("=\r\n");
-                                current_len = 0;
-                            }
-
-                            try out.writeByte(trimmed[index]);
-                            state = .start;
-                            index += 1;
-                        },
-                    }
+                    },
                 },
                 .seen_r_space => {
                     if (index + 2 == trimmed.len) {
