@@ -139,62 +139,218 @@ pub const Message = struct {
     }
 };
 
+/// Quotable printable encoding implementation.
 pub const quotable_printable = struct {
-    const MAX_LINE_LENGTH = 76;
+    // Start at 0...75 = 76 for the RFC Max line length.
+    const MAX_LINE_LENGTH = 75;
 
-    //TODO: Rework this as it is not fully compliant
+    const State = enum {
+        seen_space,
+        seen_r,
+        seen_r_space,
+        seen_n_space,
+        seen_rn_space,
+        seen_rn,
+        start,
+    };
+
     pub fn encodeWriter(out: *Writer, slice: []const u8) Writer.Error!void {
-        var current_len: usize = 1;
+        var current_len: usize = 0;
+        var index: usize = 0;
+        var state: State = .start;
         const trimmed = std.mem.trimEnd(u8, slice, &std.ascii.whitespace);
 
-        for (trimmed) |byte| {
-            switch (byte) {
-                '\t' => {
-                    if (current_len == MAX_LINE_LENGTH) {
-                        try out.writeAll("=\r\n");
-                        current_len = 1;
-                    } else current_len += 1;
-
-                    try out.writeByte(byte);
-                },
-                '=' => {
-                    const available = MAX_LINE_LENGTH - current_len;
-                    if (available < 4) {
-                        try out.writeAll("=\r\n");
-                        current_len = 3;
-                    } else current_len += 3;
-
-                    try out.print("={X:02}", .{byte});
-                },
-                else => {
-                    if (std.ascii.isPrint(byte)) {
-                        @branchHint(.likely);
-
-                        if (current_len == MAX_LINE_LENGTH) {
-                            try out.writeAll("=\r\n");
-                            current_len = 1;
-                        } else current_len += 1;
-
-                        try out.writeByte(byte);
-                    } else {
+        while (trimmed.len > index) {
+            switch (state) {
+                .start => switch (trimmed[index]) {
+                    '\r' => {
+                        state = .seen_r;
+                        continue;
+                    },
+                    ' ' => {
+                        state = .seen_space;
+                        continue;
+                    },
+                    '\t' => {
+                        state = .seen_space;
+                        continue;
+                    },
+                    '=' => {
                         const available = MAX_LINE_LENGTH - current_len;
-                        if (available < 4) {
+                        if (available > 3) {
+                            current_len += 2;
+                        } else {
                             try out.writeAll("=\r\n");
-                            current_len = 3;
-                        } else current_len += 3;
+                            current_len = 2;
+                        }
 
-                        try out.print("={X:02}", .{byte});
+                        try out.print("={X:02}", .{trimmed[index]});
+                        index += 1;
+                    },
+                    else => {
+                        if (std.ascii.isPrint(trimmed[index])) {
+                            @branchHint(.likely);
+
+                            if (current_len != MAX_LINE_LENGTH) {
+                                current_len += 1;
+                            } else {
+                                try out.writeAll("=\r\n");
+                                current_len = 0;
+                            }
+
+                            try out.writeByte(trimmed[index]);
+                            index += 1;
+
+                            continue;
+                        }
+
+                        const available = MAX_LINE_LENGTH - current_len;
+                        if (available > 3) {
+                            current_len += 2;
+                        } else {
+                            try out.writeAll("=\r\n");
+                            current_len = 2;
+                        }
+
+                        try out.print("={X:02}", .{trimmed[index]});
+                        index += 1;
+                    },
+                },
+                .seen_r => {
+                    if (index + 1 == trimmed.len) {
+                        try out.print("={X:02}", .{trimmed[index]});
+                        state = .start;
+                        index += 1;
+
+                        continue;
                     }
+
+                    switch (trimmed[index + 1]) {
+                        '\n' => {
+                            state = .seen_rn;
+                            continue;
+                        },
+                        else => {
+                            const available = MAX_LINE_LENGTH - current_len;
+                            if (available > 3) {
+                                current_len += 2;
+                            } else {
+                                try out.writeAll("=\r\n");
+                                current_len = 2;
+                            }
+
+                            try out.print("={X:02}", .{trimmed[index]});
+                            state = .start;
+                            index += 1;
+                        },
+                    }
+                },
+                .seen_rn => {
+                    if (current_len != MAX_LINE_LENGTH) {
+                        current_len += 2;
+                    } else {
+                        try out.writeAll("=\r\n");
+                        current_len = 0;
+                    }
+
+                    try out.writeAll("\r\n");
+                    state = .start;
+                    index += 2;
+                },
+                .seen_space => {
+                    if (index + 1 == trimmed.len) {
+                        try out.print("={X:02}", .{trimmed[index]});
+                        state = .start;
+                        index += 1;
+
+                        continue;
+                    }
+
+                    switch (trimmed[index + 1]) {
+                        '\r' => {
+                            state = .seen_r_space;
+                            continue;
+                        },
+                        '\n' => {
+                            state = .seen_n_space;
+                            continue;
+                        },
+                        else => {
+                            if (current_len != MAX_LINE_LENGTH) {
+                                current_len += 1;
+                            } else {
+                                try out.writeAll("=\r\n");
+                                current_len = 0;
+                            }
+
+                            try out.writeByte(trimmed[index]);
+                            state = .start;
+                            index += 1;
+                        },
+                    }
+                },
+                .seen_r_space => {
+                    if (index + 2 == trimmed.len) {
+                        try out.print("={X:02}={X:02}", .{ trimmed[index], trimmed[index + 1] });
+                        state = .start;
+                        index += 2;
+
+                        continue;
+                    }
+                    switch (trimmed[index + 2]) {
+                        '\n' => {
+                            state = .seen_rn_space;
+                            continue;
+                        },
+                        else => {
+                            if (current_len != MAX_LINE_LENGTH) {
+                                current_len += 5;
+                            } else {
+                                try out.writeAll("=\r\n");
+                                current_len = 0;
+                            }
+
+                            try out.print("={X:02}={X:02}", .{ trimmed[index], trimmed[index + 1] });
+                            state = .start;
+                            index += 2;
+                        },
+                    }
+                },
+                .seen_n_space => {
+                    if (current_len != MAX_LINE_LENGTH) {
+                        current_len += 3;
+                    } else {
+                        try out.writeAll("=\r\n");
+                        current_len = 0;
+                    }
+
+                    try out.print("={X:02}={X:02}", .{ trimmed[index], trimmed[index + 1] });
+                    state = .start;
+                    index += 2;
+                },
+                .seen_rn_space => {
+                    if (current_len != MAX_LINE_LENGTH) {
+                        current_len += 4;
+                    } else {
+                        try out.writeAll("=\r\n");
+                        current_len = 0;
+                    }
+
+                    try out.print("={X:02}\r\n", .{trimmed[index]});
+                    state = .start;
+                    index += 3;
                 },
             }
         }
 
         for (slice[trimmed.len..]) |byte| {
             const available = MAX_LINE_LENGTH - current_len;
-            if (available < 4) {
+            if (available > 3) {
+                current_len += 2;
+            } else {
                 try out.writeAll("=\r\n");
-                current_len = 3;
-            } else current_len += 3;
+                current_len = 2;
+            }
 
             try out.print("={X:02}", .{byte});
         }
@@ -204,6 +360,6 @@ pub const quotable_printable = struct {
 test quotable_printable {
     var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try quotable_printable.encodeWriter(&writer, "foooooó");
-    std.debug.print("Fooo: {s}\n", .{writer.buffered()});
+    try quotable_printable.encodeWriter(&writer, "= spaced\t\t\r\nendé\r\nodd\rline  ");
+    try std.testing.expectEqualStrings("=3D spaced\t=09\r\nend=C3=A9\r\nodd=0Dline=20=20", writer.buffered());
 }
