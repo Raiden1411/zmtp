@@ -9,6 +9,7 @@ const Writer = std.Io.Writer;
 
 pub const disable_tls = std.options.http_disable_tls;
 
+/// Protocols supported by the connection.
 pub const SmtpProtocol = enum {
     smtp,
     smtps,
@@ -23,6 +24,7 @@ pub const SmtpProtocol = enum {
     }
 };
 
+/// Present in zig but it's not public.
 pub const TlsInitError = error{
     WriteFailed,
     ReadFailed,
@@ -73,20 +75,25 @@ pub const TlsInitError = error{
     WeakPublicKey,
 } || Allocator.Error || CertificateBundle.RescanError;
 
+/// Connection reads and writes errors.
 pub const ConnectionError = NetStream.ReadError || NetStream.WriteError || error{StreamTooLong} || TlsClient.ReadError;
 
+/// Data structure that represents a SMTP/SMTPs connection.
+///
+/// Reader and Writer will differ based on the type of the connection.
 pub const Connection = struct {
     /// The writer that will be used to write to the stream connection.
     stream_writer: NetStream.Writer,
     /// The reader that will be used to read data from the socket.
     stream_reader: NetStream.Reader,
-    /// The http protocol that this connection will use.
+    /// The smtp protocol that this connection will use.
     protocol: SmtpProtocol,
     /// The hostname len associated with this connection
     host_len: u8,
     /// Port associated with this connection
     port: u16,
 
+    /// Send the close handshake and closes the socket connection.
     pub fn close(self: *Connection) void {
         const stream = self.getStream();
         defer stream.close();
@@ -94,6 +101,7 @@ pub const Connection = struct {
         self.end() catch {};
     }
 
+    /// Sends all of the close handshakes required.
     pub fn end(self: *Connection) Writer.Error!void {
         if (self.protocol == .smtps) {
             if (disable_tls) unreachable;
@@ -106,10 +114,12 @@ pub const Connection = struct {
         try self.stream_writer.interface.flush();
     }
 
+    /// Gets the underlaying socket stream.
     pub fn getStream(self: *Connection) NetStream {
         return self.stream_reader.getStream();
     }
 
+    /// Hostname of the associated connection
     pub fn hostname(self: *Connection) []const u8 {
         switch (self.protocol) {
             .smtp => {
@@ -125,6 +135,7 @@ pub const Connection = struct {
         }
     }
 
+    /// Destroys the pointer all frees all of the extra memory.
     pub fn destroy(self: *Connection, gpa: Allocator) void {
         switch (self.protocol) {
             .smtp => {
@@ -140,6 +151,7 @@ pub const Connection = struct {
         }
     }
 
+    /// Gets the reader based on the connection scheme.
     pub fn reader(self: *Connection) *Reader {
         switch (self.protocol) {
             .smtp => return self.stream_reader.interface(),
@@ -152,6 +164,7 @@ pub const Connection = struct {
         }
     }
 
+    /// Gets the writer based on the connection scheme.
     pub fn writer(self: *Connection) *Writer {
         switch (self.protocol) {
             .smtp => return &self.stream_writer.interface,
@@ -164,6 +177,7 @@ pub const Connection = struct {
         }
     }
 
+    /// Flushes the buffer and writes to the socket.
     pub fn flush(self: *Connection) Writer.Error!void {
         if (self.protocol == .smtps) {
             if (disable_tls) unreachable;
@@ -175,12 +189,14 @@ pub const Connection = struct {
         return self.stream_writer.interface.flush();
     }
 
+    /// SMTP Connection representation
     pub const Smtp = struct {
         const reader_buffer_size = 8192;
         const writer_buffer_size = 1024;
 
         connection: Connection,
 
+        /// Creates the connection and the required readers and writers.
         pub fn create(
             gpa: Allocator,
             host: []const u8,
@@ -214,21 +230,25 @@ pub const Connection = struct {
             return smtp;
         }
 
+        /// Helper to get the total allocated memory upfront.
         fn getAllocationSize(host_len: usize) usize {
             return reader_buffer_size + writer_buffer_size + @sizeOf(Smtp) + host_len;
         }
 
+        /// Destroys the pointer all frees all of the extra memory.
         fn destroy(self: *Smtp, gpa: Allocator) void {
             const base: [*]align(@alignOf(Smtp)) u8 = @ptrCast(self);
             gpa.free(base[0..getAllocationSize(self.connection.host_len)]);
         }
 
+        /// Hostname of the associated connection
         fn hostname(self: *Smtp) []u8 {
             const base: [*]u8 = @ptrCast(self);
             return base[@sizeOf(Smtp)..][0..self.connection.host_len];
         }
     };
 
+    /// SMTP Connection representation
     pub const Smtps = struct {
         const tls_buffer_size = if (disable_tls) 0 else TlsClient.min_buffer_len;
         const reader_buffer_size = 8192;
@@ -237,6 +257,8 @@ pub const Connection = struct {
         connection: Connection,
         tls_client: TlsClient,
 
+        /// Estabilshes the tls handshake and creates the
+        /// required readers and writers to interact with the socket.
         pub fn create(
             gpa: Allocator,
             host: []const u8,
@@ -294,10 +316,12 @@ pub const Connection = struct {
             return smtps;
         }
 
+        /// Helper to get the total allocated memory upfront.
         fn getAllocationSize(host_len: usize) usize {
             return reader_buffer_size + writer_buffer_size + @sizeOf(Smtps) + host_len + (tls_buffer_size * 3);
         }
 
+        /// Destroys the pointer all frees all of the extra memory.
         fn destroy(self: *Smtps, gpa: Allocator) void {
             const conn = &self.connection;
 
@@ -305,6 +329,7 @@ pub const Connection = struct {
             gpa.free(base[0..getAllocationSize(conn.host_len)]);
         }
 
+        /// Hostname of the associated connection
         fn hostname(self: *Smtps) []u8 {
             const base: [*]u8 = @ptrCast(self);
             return base[@sizeOf(Smtps)..][0..self.connection.host_len];

@@ -388,7 +388,7 @@ pub fn upgradeAndSendEmail(
     return self.sendEmailBody(message);
 }
 
-test "Foooo" {
+test "SendEmail" {
     var client = try SmtpClient.connect(std.testing.allocator, "smtp://localhost:1025");
     defer client.deinit();
 
@@ -402,7 +402,7 @@ test "Foooo" {
         .to = &.{
             .{ .address = "fooo@exp.br" },
         },
-        .subject = "THIS IS A TEST",
+        .subject = "THIS IS A TEST 🥱",
         .text_body = "HELLO FOÓ 🥱",
         .html_body = "<p> THIS IS A TEST </p>",
     }, cred);

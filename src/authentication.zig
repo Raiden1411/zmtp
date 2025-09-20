@@ -36,7 +36,7 @@ pub const Credentials = struct {
                 var buffer: [512]u8 = undefined;
                 const plain = try std.fmt.bufPrint(&buffer, "user={s}\x01auth=Bearer {s}\x01\x01", .{ self.username, self.password });
 
-                const writable = writer.writableSliceGreedy(std.base64.standard.Encoder.calcSize(plain.len));
+                const writable = try writer.writableSliceGreedy(std.base64.standard.Encoder.calcSize(plain.len));
 
                 const encoded = std.base64.standard.Encoder.encode(writable, plain);
                 writer.advance(encoded.len);

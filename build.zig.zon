@@ -1,7 +1,17 @@
 .{
     .name = .zmtp,
-    .version = "0.0.1",
-    .minimum_zig_version = "0.16.0-dev.178+b1189ab03",
-    .paths = .{""},
+    // This is a [Semantic Version](https://semver.org/).
+    // In a future version of Zig it will be used for package deduplication.
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0-dev.254+6dd0270a1",
+    .paths = .{
+        // This makes *all* files, recursively, included in this package. It is generally
+        // better to explicitly list the files and directories instead, to insure that
+        // fetching from tarballs, file system paths, and version control all result
+        // in the same contents hash.
+        "build.zig",
+        "build.zig.zon",
+        "src/",
+    },
     .fingerprint = 0x7e9f0a59e674e893,
 }

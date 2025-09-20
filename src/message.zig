@@ -1,5 +1,6 @@
 const datetime = @import("datetime.zig");
 const std = @import("std");
+const utils = @import("utils.zig");
 
 const Datetime = datetime.Datetime;
 const Writer = std.Io.Writer;
@@ -82,9 +83,18 @@ pub const Message = struct {
         }
 
         if (self.subject) |subject| {
-            // TODO: Handle non ascii.
             try writer.writeAll("Subject: ");
-            try writer.print("{s}\r\n", .{subject});
+
+            if (!utils.isNonAscii(subject)) {
+                @branchHint(.likely);
+
+                try writer.print("{s}\r\n", .{subject});
+            } else {
+                try writer.writeAll("=?UTF-8?Q?");
+                try quotable_printable.encodeWriter(writer, subject);
+
+                try writer.writeAll("?=\r\n");
+            }
         }
 
         const date = self.timestamp orelse datetime.fromUnixTimeStamp(std.time.timestamp());

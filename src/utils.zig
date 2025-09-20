@@ -49,3 +49,25 @@ pub fn parseServerResponse(slice: []const u8) !Response {
         },
     }
 }
+
+/// Traverses the slice and finds if it contains non ascii values.
+pub fn isNonAscii(slice: []const u8) bool {
+    var remaining = slice;
+    const vector_len = std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
+    const Vector = @Vector(vector_len, u8);
+
+    while (slice.len >= vector_len) {
+        const chunk: Vector = remaining[0..vector_len].*;
+        const mask: Vector = @splat(0x80);
+        if (@reduce(.Or, chunk & mask == mask)) {
+            // found a non ASCII byte
+            break;
+        }
+        remaining = remaining[vector_len..];
+    } else for (remaining) |byte| {
+        if (!std.ascii.isAscii(byte))
+            return true;
+    }
+
+    return false;
+}
