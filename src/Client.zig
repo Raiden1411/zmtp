@@ -403,7 +403,13 @@ test "SendEmail" {
             .{ .address = "fooo@exp.br" },
         },
         .subject = "THIS IS A TEST 🥱",
-        .text_body = "HELLO FOÓ 🥱",
-        .html_body = "<p> THIS IS A TEST </p>",
+        .body = .{
+            .multipart = .{
+                .alternative = .{
+                    .text = "HELLO FOÓ 🥱",
+                    .html = "<p> THIS IS A TEST </p>",
+                },
+            },
+        },
     }, cred);
 }
