@@ -56,15 +56,20 @@ pub fn main() !void {
         .password = "bar",
     };
 
-    // This will upgrade the connection to tls via STARTTLS
     try client.sendEmailWithCredentials(.{
-        .from = .{ .address = "fooo@bar.sh" },
+        .from = .{ .address = "fooo@exp.pt" },
         .to = &.{
-            .{ .address = "fooo@bar.io" },
+            .{ .address = "fooo@exp.br" },
         },
         .subject = "THIS IS A TEST 🥱",
-        .text_body = "HELLO WORLD! 🥱",
-        .html_body = "<p> THIS IS A TEST </p>",
+        .body = .{
+            .multipart = .{
+                .alternative = .{
+                    .text = "HELLO FOÓ 🥱",
+                    .html = "<p> THIS IS A TEST </p>",
+                },
+            },
+        },
     }, cred);
 }
 ```
