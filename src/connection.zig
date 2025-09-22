@@ -302,7 +302,7 @@ pub const Connection = struct {
                     &smtps.connection.stream_writer.interface,
                     .{
                         .host = .{ .explicit = host },
-                        .ca = .self_signed,
+                        .ca = .{ .bundle = bundle },
                         .ssl_key_log = null,
                         .read_buffer = reader_buffer,
                         .write_buffer = writer_buffer,
