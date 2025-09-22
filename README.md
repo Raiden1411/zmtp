@@ -49,6 +49,7 @@ const zmtp = @import("zmtp");
 const CertificateBundle = std.crypto.Certificate.Bundle;
 const EmailClient = zmtp.EmailClient;
 const Credentials = zmtp.authentication.Credentials;
+const Message = zmtp.message.Message;
 
 pub fn main() !void {
     var bundle: CertificateBundle = .{};
@@ -69,10 +70,10 @@ pub fn main() !void {
         .password = "bar",
     };
 
-    try client.sendEmailWithCredentials(.{
-        .from = .{ .address = "fooo@exp.pt" },
+    const message: Message = .{
+        .from = .{ .address = "fooo@exp.com" },
         .to = &.{
-            .{ .address = "fooo@exp.br" },
+            .{ .address = "fooo@exp.com" },
         },
         .subject = "THIS IS A TEST 🥱",
         .body = .{
@@ -83,7 +84,9 @@ pub fn main() !void {
                 },
             },
         },
-    }, cred);
+    };
+
+    try client.sendEmailWithCredentials(message, cred);
 }
 ```
 
