@@ -6,6 +6,7 @@ const utils = @import("utils.zig");
 
 const Allocator = std.mem.Allocator;
 const Auth = auth.Auth;
+const CertificateBundle = std.crypto.Certificate.Bundle;
 const Connection = conn.Connection;
 const ConnectionError = conn.ConnectionError;
 const Credentials = auth.Credentials;
@@ -14,6 +15,7 @@ const ParseIntError = std.fmt.ParseIntError;
 const SmtpClient = @This();
 const SmtpProtocol = conn.SmtpProtocol;
 const Reader = std.Io.Reader;
+const TlsClient = std.crypto.tls.Client;
 const TlsInitError = conn.TlsInitError;
 const TcpConnectToHostError = std.net.TcpConnectToHostError;
 const Uri = std.Uri;
@@ -22,7 +24,31 @@ const Writer = std.Io.Writer;
 /// Allocator used to create the socket connection.
 allocator: Allocator,
 /// SMTP or SMPTS connection to the socket.
-connection: *Connection,
+///
+/// Must call the `connect` function. If not all actions will cause UB.
+///
+/// You can also create a specific `Connection` and manually add it to the client.
+///
+/// See more:
+///
+/// * Connection.Smtp
+/// * Connection.Smtps
+connection: *Connection = undefined,
+/// Certificate bundle used to perform the tls handshake.
+///
+/// This client will not rescan the root certificates so please make sure
+/// that the provided bundle already has the correct certificates.
+ca_bundle: if (conn.disable_tls) void else CertificateBundle = if (conn.disable_tls) {} else .{},
+/// Used both for the reader and writer buffers.
+tls_buffer_size: if (conn.disable_tls) u0 else usize = if (conn.disable_tls) 0 else TlsClient.min_buffer_len,
+/// If non-null, ssl secrets are logged to a stream. Creating such a stream
+/// allows other processes with access to that stream to decrypt all
+/// traffic over connections created with this `Client`.
+ssl_key_log: ?*TlsClient.SslKeyLog = null,
+/// Each `Connection` allocates this amount for the reader buffer.
+read_buffer_size: usize = 8192,
+/// Each `Connection` allocates this amount for the writer buffer.
+write_buffer_size: usize = 1024,
 
 /// Errors that a smtp server can respond with.
 pub const ServerError = error{
@@ -103,9 +129,11 @@ pub const ClientExtensions = struct {
 /// If no port is provided the client will use
 /// 1025 for SMTP connections and 465 for SMPTS connections.
 pub fn connect(
-    gpa: Allocator,
+    self: *SmtpClient,
     url: []const u8,
-) ConnectError!SmtpClient {
+) ConnectError!void {
+    const gpa = self.allocator;
+
     const uri = try Uri.parse(url);
     const scheme = SmtpProtocol.fromScheme(uri.scheme) orelse return error.InvalidSmptScheme;
 
@@ -119,20 +147,17 @@ pub fn connect(
 
     const stream = try std.net.tcpConnectToHost(gpa, host, port);
     const connection = switch (scheme) {
-        .smtp => &(try Connection.Smtp.create(gpa, host, port, stream)).connection,
-        .smtps => &(try Connection.Smtps.create(gpa, host, port, stream)).connection,
+        .smtp => &(try Connection.Smtp.create(self, host, port, stream)).connection,
+        .smtps => &(try Connection.Smtps.create(self, host, port, stream)).connection,
     };
 
-    return .{
-        .allocator = gpa,
-        .connection = connection,
-    };
+    self.connection = connection;
 }
 
 /// Closes the connections and frees any allocated memory.
 pub fn deinit(self: *SmtpClient) void {
     self.connection.close();
-    self.connection.destroy(self.allocator);
+    self.connection.destroy();
 }
 
 /// Upgrades the connection to a TLS connection.
@@ -152,13 +177,13 @@ pub fn startTls(self: *SmtpClient) StartTlsError!void {
         return error.InvalidTlsHandshakeResponse;
 
     const tls = try Connection.Smtps.create(
-        self.allocator,
+        self,
         self.connection.hostname(),
         self.connection.port,
         self.connection.getStream(),
     );
 
-    self.connection.destroy(self.allocator);
+    self.connection.destroy();
     self.connection = &tls.connection;
 }
 
@@ -325,6 +350,8 @@ pub fn sendEmail(
     if (self.connection.protocol == .smtp and extensions.upgrade_tls)
         try self.startTls();
 
+    std.debug.assert(self.connection.protocol == .smtps); // Connection must be smtps after the upgrade
+
     try self.handshake(message, extensions);
 
     return self.sendEmailBody(message);
@@ -389,8 +416,18 @@ pub fn upgradeAndSendEmail(
 }
 
 test "SendEmail" {
-    var client = try SmtpClient.connect(std.testing.allocator, "smtp://localhost:1025");
+    var bundle: CertificateBundle = .{};
+    defer bundle.deinit(std.testing.allocator);
+
+    try bundle.addCertsFromFilePathAbsolute(std.testing.allocator, "/home/raiden/cert.pem");
+
+    var client: SmtpClient = .{
+        .allocator = std.testing.allocator,
+        .ca_bundle = bundle,
+    };
     defer client.deinit();
+
+    try client.connect("smtp://localhost:1025");
 
     const cred: Credentials = .{
         .username = "foo",

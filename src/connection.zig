@@ -4,8 +4,10 @@ const Allocator = std.mem.Allocator;
 const CertificateBundle = std.crypto.Certificate.Bundle;
 const NetStream = std.net.Stream;
 const Reader = std.Io.Reader;
+const SmtpClient = @import("Client.zig");
 const TlsClient = std.crypto.tls.Client;
 const Writer = std.Io.Writer;
+const Uri = std.Uri;
 
 pub const disable_tls = std.options.http_disable_tls;
 
@@ -82,6 +84,7 @@ pub const ConnectionError = NetStream.ReadError || NetStream.WriteError || error
 ///
 /// Reader and Writer will differ based on the type of the connection.
 pub const Connection = struct {
+    client: *SmtpClient,
     /// The writer that will be used to write to the stream connection.
     stream_writer: NetStream.Writer,
     /// The reader that will be used to read data from the socket.
@@ -136,17 +139,17 @@ pub const Connection = struct {
     }
 
     /// Destroys the pointer all frees all of the extra memory.
-    pub fn destroy(self: *Connection, gpa: Allocator) void {
+    pub fn destroy(self: *Connection) void {
         switch (self.protocol) {
             .smtp => {
                 const smtp: *Smtp = @alignCast(@fieldParentPtr("connection", self));
-                return smtp.destroy(gpa);
+                return smtp.destroy();
             },
             .smtps => {
                 if (disable_tls) unreachable;
 
                 const smtps: *Smtps = @alignCast(@fieldParentPtr("connection", self));
-                return smtps.destroy(gpa);
+                return smtps.destroy();
             },
         }
     }
@@ -191,26 +194,24 @@ pub const Connection = struct {
 
     /// SMTP Connection representation
     pub const Smtp = struct {
-        const reader_buffer_size = 8192;
-        const writer_buffer_size = 1024;
-
         connection: Connection,
 
         /// Creates the connection and the required readers and writers.
         pub fn create(
-            gpa: Allocator,
+            client: *SmtpClient,
             host: []const u8,
             port: u16,
             stream: NetStream,
         ) Allocator.Error!*Smtp {
-            const allocation_size = getAllocationSize(host.len);
+            const gpa = client.allocator;
+            const allocation_size = getAllocationSize(client, host.len);
 
             const base = try gpa.alignedAlloc(u8, .of(Smtp), allocation_size);
             errdefer gpa.free(base);
 
             const host_buffer = base[@sizeOf(Smtp)..][0..host.len];
-            const reader_buffer = host_buffer.ptr[host_buffer.len..][0..reader_buffer_size];
-            const writer_buffer = reader_buffer.ptr[reader_buffer.len..][0..writer_buffer_size];
+            const reader_buffer = host_buffer.ptr[host_buffer.len..][0..client.read_buffer_size];
+            const writer_buffer = reader_buffer.ptr[reader_buffer.len..][0..client.write_buffer_size];
 
             std.debug.assert(base.ptr + allocation_size == writer_buffer.ptr + writer_buffer.len);
             @memcpy(host_buffer, host);
@@ -219,6 +220,7 @@ pub const Connection = struct {
 
             smtp.* = .{
                 .connection = .{
+                    .client = client,
                     .host_len = @intCast(host.len),
                     .port = port,
                     .protocol = .smtp,
@@ -231,14 +233,16 @@ pub const Connection = struct {
         }
 
         /// Helper to get the total allocated memory upfront.
-        fn getAllocationSize(host_len: usize) usize {
-            return reader_buffer_size + writer_buffer_size + @sizeOf(Smtp) + host_len;
+        fn getAllocationSize(client: *SmtpClient, host_len: usize) usize {
+            return client.read_buffer_size + client.write_buffer_size + @sizeOf(Smtp) + host_len;
         }
 
         /// Destroys the pointer all frees all of the extra memory.
-        fn destroy(self: *Smtp, gpa: Allocator) void {
+        fn destroy(self: *Smtp) void {
+            const conn = &self.connection;
+
             const base: [*]align(@alignOf(Smtp)) u8 = @ptrCast(self);
-            gpa.free(base[0..getAllocationSize(self.connection.host_len)]);
+            conn.client.allocator.free(base[0..getAllocationSize(conn.client, self.connection.host_len)]);
         }
 
         /// Hostname of the associated connection
@@ -250,46 +254,41 @@ pub const Connection = struct {
 
     /// SMTP Connection representation
     pub const Smtps = struct {
-        const tls_buffer_size = if (disable_tls) 0 else TlsClient.min_buffer_len;
-        const reader_buffer_size = 8192;
-        const writer_buffer_size = 1024;
-
         connection: Connection,
         tls_client: TlsClient,
 
         /// Estabilshes the tls handshake and creates the
         /// required readers and writers to interact with the socket.
+        ///
+        /// Leave the host empty if you wish to perform a no_verification check
         pub fn create(
-            gpa: Allocator,
+            client: *SmtpClient,
             host: []const u8,
             port: u16,
             stream: NetStream,
         ) TlsInitError!*Smtps {
-            const allocation_size = getAllocationSize(host.len);
+            const gpa = client.allocator;
+            const allocation_size = getAllocationSize(client, host.len);
 
             const base = try gpa.alignedAlloc(u8, .of(Smtps), allocation_size);
             errdefer gpa.free(base);
 
             const host_buffer = base[@sizeOf(Smtps)..][0..host.len];
 
-            const smtps_reader_buffer = host_buffer.ptr[host_buffer.len..][0 .. tls_buffer_size + reader_buffer_size];
-            const smtps_writer_buffer = smtps_reader_buffer.ptr[smtps_reader_buffer.len..][0..tls_buffer_size];
+            const smtps_reader_buffer = host_buffer.ptr[host_buffer.len..][0 .. client.tls_buffer_size + client.read_buffer_size];
+            const smtps_writer_buffer = smtps_reader_buffer.ptr[smtps_reader_buffer.len..][0..client.tls_buffer_size];
 
-            const writer_buffer = smtps_writer_buffer.ptr[smtps_writer_buffer.len..][0..writer_buffer_size];
-            const reader_buffer = writer_buffer.ptr[writer_buffer.len..][0..tls_buffer_size];
+            const writer_buffer = smtps_writer_buffer.ptr[smtps_writer_buffer.len..][0..client.write_buffer_size];
+            const reader_buffer = writer_buffer.ptr[writer_buffer.len..][0..client.tls_buffer_size];
 
             std.debug.assert(base.ptr + allocation_size == reader_buffer.ptr + reader_buffer.len);
             @memcpy(host_buffer, host);
 
             const smtps: *Smtps = @ptrCast(base);
 
-            var bundle: CertificateBundle = .{};
-            defer bundle.deinit(gpa);
-
-            try bundle.rescan(gpa);
-
             smtps.* = .{
                 .connection = .{
+                    .client = client,
                     .host_len = @intCast(host.len),
                     .port = port,
                     .protocol = .smtps,
@@ -301,8 +300,8 @@ pub const Connection = struct {
                     smtps.connection.stream_reader.interface(),
                     &smtps.connection.stream_writer.interface,
                     .{
-                        .host = .{ .explicit = host },
-                        .ca = .{ .bundle = bundle },
+                        .host = if (host.len != 0) .{ .explicit = host } else .no_verification,
+                        .ca = .{ .bundle = client.ca_bundle },
                         .ssl_key_log = null,
                         .read_buffer = reader_buffer,
                         .write_buffer = writer_buffer,
@@ -317,16 +316,16 @@ pub const Connection = struct {
         }
 
         /// Helper to get the total allocated memory upfront.
-        fn getAllocationSize(host_len: usize) usize {
-            return reader_buffer_size + writer_buffer_size + @sizeOf(Smtps) + host_len + (tls_buffer_size * 3);
+        fn getAllocationSize(client: *SmtpClient, host_len: usize) usize {
+            return client.read_buffer_size + client.write_buffer_size + @sizeOf(Smtps) + host_len + (client.tls_buffer_size * 3);
         }
 
         /// Destroys the pointer all frees all of the extra memory.
-        fn destroy(self: *Smtps, gpa: Allocator) void {
+        fn destroy(self: *Smtps) void {
             const conn = &self.connection;
 
             const base: [*]align(@alignOf(Smtps)) u8 = @ptrCast(self);
-            gpa.free(base[0..getAllocationSize(conn.host_len)]);
+            conn.client.allocator.free(base[0..getAllocationSize(conn.client, conn.host_len)]);
         }
 
         /// Hostname of the associated connection

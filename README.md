@@ -43,13 +43,26 @@ const EmailClient = zmtp.EmailClient;
 You can check of the examples in the example/ folder but for a simple introduction you can checkout the bellow example.
 
 ```zig
+const std = @import("std");
 const zmtp = @import("zmtp");
 
+const CertificateBundle = std.crypto.Certificate.Bundle;
 const EmailClient = zmtp.EmailClient;
+const Credentials = zmtp.authentication.Credentials;
 
 pub fn main() !void {
-    var client = try EmailClient.connect(std.testing.allocator, "smtp://localhost:1025");
+    var bundle: CertificateBundle = .{};
+    defer bundle.deinit(std.testing.allocator);
+
+    try bundle.rescan(std.testing.allocator);
+
+    var client: SmtpClient = .{
+        .allocator = std.testing.allocator,
+        .ca_bundle = bundle,
+    };
     defer client.deinit();
+
+    try client.connect("smtp://localhost:1025");
 
     const cred: Credentials = .{
         .username = "foo",
