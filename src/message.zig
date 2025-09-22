@@ -257,7 +257,7 @@ pub const Attachment = union(enum) {
                     try writer.print("Content-Type: {s};\r\n", .{content.content_type});
                     try writer.writeAll("Content-Transfer-Encoding: base64\r\n");
                     try writer.writeAll("Content-Disposition: inline;\r\n");
-                    try writer.print("Content-Id: <{s}>\r\n\r\n", .{content.content_id});
+                    try writer.print("Content-Id: {f}\r\n\r\n", .{content.content_id});
                     try writer.print("{b64}\r\n", .{content.body_contents});
                 }
             },
