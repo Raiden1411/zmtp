@@ -24,6 +24,7 @@ pub const Credentials = struct {
     /// Encodes these credentials based of the auth offerings from the server.
     ///
     /// This writes to the connection directly.
+    /// Assumes that the writers buffer has enough room to fix the base64 encoded encoded auth.
     pub fn encode(self: Credentials, auth: Auth, connection: *Connection) Error!void {
         const reader = connection.reader();
         const writer = connection.writer();
@@ -56,9 +57,9 @@ pub const Credentials = struct {
                 var buffer: [512]u8 = undefined;
                 const plain = try std.fmt.bufPrint(&buffer, "\x00{s}\x00{s}", .{ self.username, self.password });
 
-                std.debug.assert(writer.buffer.len > std.base64.standard.Encoder.calcSize(plain.len)); // Cannot fit into writers buffer
+                const writable = try writer.writableSliceGreedy(std.base64.standard.Encoder.calcSize(plain.len));
 
-                const encoded = std.base64.standard.Encoder.encode(writer.buffer[writer.end..], plain);
+                const encoded = std.base64.standard.Encoder.encode(writable, plain);
                 writer.advance(encoded.len);
 
                 try writer.writeAll("\r\n");

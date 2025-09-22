@@ -32,7 +32,7 @@ pub const SingleMessageBody = union(enum) {
     text: []const u8,
     /// Writes the Content-Type as "text/html".
     html: []const u8,
-    /// Data structure that represent as email attachment.
+    /// Data structure that represents as email attachment.
     attachment: Attachment,
 
     /// Formats the email message body into the expected header and content values.
@@ -140,9 +140,7 @@ pub const MultipartMessageBody = union(enum) {
 
                         try writer.writeAll("\r\n");
                     }
-                }
-
-                if (body.text) |text_body| {
+                } else if (body.text) |text_body| {
                     try writer.writeAll("Content-Type: text/plain; charset=utf-8\r\n");
                     try writer.writeAll("Content-Transfer-Encoding: quoted-printable\r\n\r\n");
                     try quotable_printable.encodeWriter(writer, text_body);
@@ -180,7 +178,7 @@ pub const MultipartMessageBody = union(enum) {
                 try writer.writeAll("\r\n");
 
                 for (body.attachments) |attachment| {
-                    std.debug.assert(attachment == .inlined); // Cannot send inlined email attachment in multipart/related
+                    std.debug.assert(attachment == .inlined); // Cannot send non inlined email attachment in multipart/related
                     try writer.print("--{x}\r\n", .{&boundary});
                     try writer.print("{f}", .{attachment});
                 }
@@ -212,9 +210,17 @@ pub const MessageBody = union(enum) {
 /// Data structure that represent an email attachment that
 /// can either be inlined or sent just as the attachment.
 pub const Attachment = union(enum) {
-    /// The attachment can be inlined in the email body.
+    /// The attachment can be inlined in the email body if
+    /// the email body is a html body.
+    ///
+    /// Example:
+    ///
+    /// ```zig
+    /// const content_id = try std.fmt.bufPrint(&buffer, "{x}@{s}", .{ message_id.id, message_id.domain });
+    /// const html = try std.fmt.bufPrint(&buffer1, "<img src=\"cid:{s}\" alt=\"Fooo\" />", .{content_id});
+    /// ```
     inlined: struct {
-        content_id: []const u8,
+        content_id: MessageId,
         body_contents: []const u8,
         content_type: []const u8,
         name: ?[]const u8,
@@ -245,7 +251,7 @@ pub const Attachment = union(enum) {
                     try writer.writeAll("Content-Transfer-Encoding: base64\r\n");
                     try writer.print("Content-Disposition: inline; filename={s}\r\n", .{name});
                     try writer.print("Content-Location: {s};\r\n", .{name});
-                    try writer.print("Content-Id: <{s}>\r\n\r\n", .{content.content_id});
+                    try writer.print("Content-Id: {f}\r\n\r\n", .{content.content_id});
                     try writer.print("{b64}\r\n", .{content.body_contents});
                 } else {
                     try writer.print("Content-Type: {s};\r\n", .{content.content_type});
