@@ -70,6 +70,9 @@ pub fn main() !void {
         .password = "bar",
     };
 
+    // Authenticate once
+    try client.serverHandshakeWithCredentials(cred);
+
     const message: Message = .{
         .from = .{ .address = "fooo@exp.com" },
         .to = &.{
@@ -86,7 +89,8 @@ pub fn main() !void {
         },
     };
 
-    try client.sendEmailWithCredentials(message, cred);
+    // Now you can send multiple emails.
+    try client.sendEmail(message);
 }
 ```
 

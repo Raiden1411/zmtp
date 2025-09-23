@@ -49,6 +49,11 @@ ssl_key_log: ?*TlsClient.SslKeyLog = null,
 read_buffer_size: usize = 8192,
 /// Each `Connection` allocates this amount for the writer buffer.
 write_buffer_size: usize = 1024,
+/// The negociated server extensions that this client supports.
+///
+/// If this is null it means this has not been negociated yet with the server.
+/// This must happen when calling `serverHandshakeWithCredentials` or `serverHandshake`
+server_extensions: ?ClientExtensions = null,
 
 /// Errors that a smtp server can respond with.
 pub const ServerError = error{
@@ -86,16 +91,16 @@ pub const GreetingsError = Reader.Error || Writer.Error || ServerError ||
 pub const ReadServerExtensionsError = error{HandshakeOversize} || GreetingsError;
 
 /// Set of errors that can happen when performing the handshake.
-pub const HandshakeError = ReadServerExtensionsError || error{ExpectToAddress};
+pub const SetTargetsError = ReadServerExtensionsError || error{ ExpectToAddress, NoServerHandshakeMade };
 
 /// Set of errors that can happen when performing the tls upgrade request.
 pub const StartTlsError = TlsInitError || GreetingsError || error{InvalidTlsHandshakeResponse};
 
 /// Set of errors that can happen when sending an email.
-pub const SendEmailError = HandshakeError || StartTlsError;
+pub const SendEmailError = SetTargetsError || StartTlsError;
 
 /// Set of errors that can happen when sending and authenticated email.
-pub const SendEmailAuthError = SendEmailError || error{ UnsupportedAuthHandshake, TlsRequiredForAuth };
+pub const ServerAuthHandshake = StartTlsError || ReadServerExtensionsError || error{ UnsupportedAuthHandshake, TlsRequiredForAuth };
 
 /// Set of errors that can happen when performing the initial smtp server connection.
 pub const ConnectError = Uri.ParseError || TlsInitError || TcpConnectToHostError ||
@@ -158,33 +163,6 @@ pub fn connect(
 pub fn deinit(self: *SmtpClient) void {
     self.connection.close();
     self.connection.destroy();
-}
-
-/// Upgrades the connection to a TLS connection.
-///
-/// Email server must support `STARTTLS` exchange. Otherwise this might block or fail.
-/// After establishing the connection it will send the `EHLO` exchange.
-pub fn startTls(self: *SmtpClient) StartTlsError!void {
-    std.debug.assert(self.connection.protocol == .smtp); // Connection already tls
-
-    try self.connection.writer().writeAll("STARTTLS\r\n");
-    try self.connection.flush();
-
-    const tls_start = try self.connection.reader().takeDelimiterInclusive('\n');
-
-    const response_start = try utils.parseServerResponse(tls_start);
-    if (response_start.code != 220)
-        return error.InvalidTlsHandshakeResponse;
-
-    const tls = try Connection.Smtps.create(
-        self,
-        self.connection.hostname(),
-        self.connection.port,
-        self.connection.getStream(),
-    );
-
-    self.connection.destroy();
-    self.connection = &tls.connection;
 }
 
 /// Starts the greetings exchange and send the `EHLO` exchange.
@@ -260,7 +238,21 @@ pub fn readServerExtensions(self: *SmtpClient) ReadServerExtensionsError!ClientE
     }
 }
 
-/// Performs the handshake exchange where it sends the servers the information that it needs.
+/// Sends email to the server.
+///
+/// The server handshake must have been made beforehand in order to send emails.
+/// If no handshake was made prior this will error.
+pub fn sendEmail(
+    self: *SmtpClient,
+    message: Message,
+) SendEmailError!void {
+    try self.setEmailTargets(message);
+
+    return self.sendEmailBody(message);
+}
+
+/// Sets the email targets for the email and prepares the email for DATA.
+/// Assumes that the extensions negociation has already been made. Otherwise this will fail.
 ///
 /// If SMTPUTF8 or 8BITMIME is supported it will append to the `MAIL FROM` exchange.
 ///
@@ -269,11 +261,17 @@ pub fn readServerExtensions(self: *SmtpClient) ReadServerExtensionsError!ClientE
 /// -> MAIL FROM:<foo@bar.com>
 /// -> RCPT TO:<baz@bar.com>
 /// -> DATA\r\n
-pub fn handshake(
+///
+/// See also:
+///
+/// * sendEmail
+/// * sendEmailBody
+pub fn setEmailTargets(
     self: *SmtpClient,
     message: Message,
-    extensions: ClientExtensions,
-) HandshakeError!void {
+) SetTargetsError!void {
+    const extensions = self.server_extensions orelse return error.NoServerHandshakeMade;
+
     const writer = self.connection.writer();
     const reader = self.connection.reader();
 
@@ -319,6 +317,10 @@ pub fn handshake(
 /// be sent to the server.
 ///
 /// Make sure that you have made the required handshakes before using this.
+///
+/// See also:
+///
+/// * setEmailTargets
 pub fn sendEmailBody(self: *SmtpClient, message: Message) GreetingsError!void {
     const reader = self.connection.reader();
     const writer = self.connection.writer();
@@ -333,47 +335,51 @@ pub fn sendEmailBody(self: *SmtpClient, message: Message) GreetingsError!void {
         return utils.parseResponseCode(response.code);
 }
 
-/// Sends unauthenticated email to the server.
-/// This prefers tls connections when it is supported by the server.
+/// Performs the inital server handshake.
+/// Upgrades the connection to tls if the server supports it.
 ///
-/// Performs all of the necessary actions in order to send the email successfully.
+/// This will not authenticate to the server if it is required!
 ///
-/// This assumes that the greetings exchange has not been made and that
-/// the server extensions have not been parsed.
-pub fn sendEmail(
-    self: *SmtpClient,
-    message: Message,
-) SendEmailError!void {
+/// See also:
+///
+/// * serverHandshakeWithCredentials
+/// * readServerExtensions
+/// * greetings
+/// * startTls
+pub fn serverHandshake(self: *SmtpClient) ReadServerExtensionsError!void {
     try self.greetings();
-    const extensions = try self.readServerExtensions();
+
+    const extensions = blk: {
+        if (self.server_extensions) |extensions|
+            break :blk extensions;
+
+        const extensions = try self.readServerExtensions();
+        self.server_extensions = extensions;
+
+        break :blk extensions;
+    };
 
     if (self.connection.protocol == .smtp and extensions.upgrade_tls)
         try self.startTls();
-
-    std.debug.assert(self.connection.protocol == .smtps); // Connection must be smtps after the upgrade
-
-    try self.handshake(message, extensions);
-
-    return self.sendEmailBody(message);
 }
 
-/// Sends the email to the server with the specified credentials.
+/// Performs the inital server handshake. Upgrades the connection to tls and authenticates it.
+/// If the server doesn't support the STARTTLS exchange this will fail.
 ///
-/// This will upgrade the connection to tls. So the server must support this.
-/// Performs all of the necessary actions in order to send the email successfully.
+/// See also:
 ///
-/// This assumes that the greetings exchange has not been made and that
-/// the server extensions have not been parsed.
-pub fn sendEmailWithCredentials(
+/// * serverHandshake
+/// * readServerExtensions
+/// * greetings
+/// * startTls
+pub fn serverHandshakeWithCredentials(
     self: *SmtpClient,
-    message: Message,
     cred: Credentials,
-) SendEmailAuthError!void {
-    try self.greetings();
-    const extensions = try self.readServerExtensions();
+) ServerAuthHandshake!void {
+    try self.serverHandshake();
 
     if (self.connection.protocol == .smtp) {
-        if (!extensions.upgrade_tls)
+        if (!self.server_extensions.?.upgrade_tls)
             return error.TlsRequiredForAuth;
 
         try self.startTls();
@@ -381,38 +387,36 @@ pub fn sendEmailWithCredentials(
 
     std.debug.assert(self.connection.protocol == .smtps); // Auth must be done via tls connection
 
-    const auth_type = extensions.auth orelse return error.UnsupportedAuthHandshake;
-    try cred.encode(auth_type, self.connection);
+    const auth_type = self.server_extensions.?.auth orelse return error.UnsupportedAuthHandshake;
 
-    try self.handshake(message, extensions);
-
-    return self.sendEmailBody(message);
+    return cred.encode(auth_type, self.connection);
 }
 
-/// Upgrades the connection to TLS and sends an unauthenticated email to the server.
+/// Upgrades the connection to a TLS connection.
 ///
-/// Performs all of the necessary actions in order to send the email successfully.
-///
-/// This assumes that the greetings exchange has not been made and that
-/// the server extensions have not been parsed.
-pub fn upgradeAndSendEmail(
-    self: *SmtpClient,
-    message: Message,
-) SendEmailError!void {
-    std.debug.assert(self.connection.protocol == .smtp); // Connection must be smtp for upgrade
+/// Email server must support `STARTTLS` exchange. Otherwise this might block or fail.
+/// After establishing the connection it will send the `EHLO` exchange.
+pub fn startTls(self: *SmtpClient) StartTlsError!void {
+    std.debug.assert(self.connection.protocol == .smtp); // Connection already tls
 
-    try self.greetings();
-    const extensions = try self.readServerExtensions();
+    try self.connection.writer().writeAll("STARTTLS\r\n");
+    try self.connection.flush();
 
-    if (!extensions.upgrade_tls)
-        return error.UnsupportedTlsUpgrade;
+    const tls_start = try self.connection.reader().takeDelimiterInclusive('\n');
 
-    try self.startTls();
-    std.debug.assert(self.connection.protocol == .smtps); // Connection must be smtps after the upgrade
+    const response_start = try utils.parseServerResponse(tls_start);
+    if (response_start.code != 220)
+        return error.InvalidTlsHandshakeResponse;
 
-    try self.handshake(message, extensions);
+    const tls = try Connection.Smtps.create(
+        self,
+        self.connection.hostname(),
+        self.connection.port,
+        self.connection.getStream(),
+    );
 
-    return self.sendEmailBody(message);
+    self.connection.destroy();
+    self.connection = &tls.connection;
 }
 
 test "SendEmail" {
@@ -434,7 +438,9 @@ test "SendEmail" {
         .password = "bar",
     };
 
-    try client.sendEmailWithCredentials(.{
+    try client.serverHandshakeWithCredentials(cred);
+
+    try client.sendEmail(.{
         .from = .{ .address = "fooo@exp.pt" },
         .to = &.{
             .{ .address = "fooo@exp.br" },
@@ -448,5 +454,5 @@ test "SendEmail" {
                 },
             },
         },
-    }, cred);
+    });
 }
