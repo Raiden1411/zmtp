@@ -346,7 +346,7 @@ pub fn sendEmailBody(self: *SmtpClient, message: Message) GreetingsError!void {
 /// * readServerExtensions
 /// * greetings
 /// * startTls
-pub fn serverHandshake(self: *SmtpClient) ReadServerExtensionsError!void {
+pub fn serverHandshake(self: *SmtpClient) (StartTlsError || ReadServerExtensionsError)!void {
     try self.greetings();
 
     const extensions = blk: {
