@@ -272,7 +272,7 @@ pub const Message = struct {
     cc: ?[]const EmailAddress = null,
     bcc: ?[]const EmailAddress = null,
     subject: ?[]const u8 = null,
-    timestamp: ?Datetime = null,
+    timestamp: std.Io.Timestamp,
     body: MessageBody,
 
     /// Formats the email message with the expected headers.
@@ -336,7 +336,7 @@ pub const Message = struct {
             }
         }
 
-        const date = self.timestamp orelse datetime.fromUnixTimeStamp(std.time.timestamp());
+        const date = datetime.fromUnixTimeStamp(self.timestamp.toSeconds());
         try writer.print("Date: {f}\r\n", .{date});
 
         try writer.writeAll("MIME-Version: 1.0\r\n");

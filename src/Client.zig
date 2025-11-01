@@ -10,19 +10,23 @@ const CertificateBundle = std.crypto.Certificate.Bundle;
 const Connection = conn.Connection;
 const ConnectionError = conn.ConnectionError;
 const Credentials = auth.Credentials;
+const HostName = Io.net.HostName;
+const Io = std.Io;
 const Message = msg.Message;
 const ParseIntError = std.fmt.ParseIntError;
 const SmtpClient = @This();
 const SmtpProtocol = conn.SmtpProtocol;
-const Reader = std.Io.Reader;
+const Reader = Io.Reader;
 const TlsClient = std.crypto.tls.Client;
 const TlsInitError = conn.TlsInitError;
-const TcpConnectToHostError = std.net.TcpConnectToHostError;
+const TcpConnectToHostError = Io.net.IpAddress.ConnectError || HostName.LookupError;
 const Uri = std.Uri;
-const Writer = std.Io.Writer;
+const Writer = Io.Writer;
 
 /// Allocator used to create the socket connection.
 allocator: Allocator,
+/// Io interface to use in this client
+io: Io,
 /// SMTP or SMPTS connection to the socket.
 ///
 /// Must call the `connect` function. If not all actions will cause UB.
@@ -137,12 +141,10 @@ pub fn connect(
     self: *SmtpClient,
     url: []const u8,
 ) ConnectError!void {
-    const gpa = self.allocator;
-
     const uri = try Uri.parse(url);
     const scheme = SmtpProtocol.fromScheme(uri.scheme) orelse return error.InvalidSmptScheme;
 
-    var buffer: [Uri.host_name_max]u8 = undefined;
+    var buffer: [HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&buffer);
 
     const port: u16 = uri.port orelse switch (scheme) {
@@ -150,7 +152,7 @@ pub fn connect(
         .smtps => 465,
     };
 
-    const stream = try std.net.tcpConnectToHost(gpa, host, port);
+    const stream = try host.connect(self.io, port, .{ .mode = .stream });
     const connection = switch (scheme) {
         .smtp => &(try Connection.Smtp.create(self, host, port, stream)).connection,
         .smtps => &(try Connection.Smtps.create(self, host, port, stream)).connection,
@@ -161,7 +163,7 @@ pub fn connect(
 
 /// Closes the connections and frees any allocated memory.
 pub fn deinit(self: *SmtpClient) void {
-    self.connection.close();
+    self.connection.close(self.io);
     self.connection.destroy();
 }
 
@@ -420,12 +422,23 @@ pub fn startTls(self: *SmtpClient) StartTlsError!void {
 }
 
 test "SendEmail" {
+    var threaded_io: Io.Threaded = .init(std.testing.allocator);
+    defer threaded_io.deinit();
+
+    const io = threaded_io.io();
+
     var bundle: CertificateBundle = .{};
     defer bundle.deinit(std.testing.allocator);
 
-    try bundle.addCertsFromFilePathAbsolute(std.testing.allocator, "/home/raiden/cert.pem");
+    try bundle.addCertsFromFilePathAbsolute(
+        std.testing.allocator,
+        io,
+        try Io.Clock.real.now(io),
+        "/home/raiden/cert.pem",
+    );
 
     var client: SmtpClient = .{
+        .io = io,
         .allocator = std.testing.allocator,
         .ca_bundle = bundle,
     };
@@ -446,6 +459,7 @@ test "SendEmail" {
             .{ .address = "fooo@exp.br" },
         },
         .subject = "THIS IS A TEST 🥱",
+        .timestamp = try std.Io.Clock.real.now(io),
         .body = .{
             .multipart = .{
                 .alternative = .{

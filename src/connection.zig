@@ -2,11 +2,13 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const CertificateBundle = std.crypto.Certificate.Bundle;
-const NetStream = std.net.Stream;
-const Reader = std.Io.Reader;
+const HostName = Io.net.HostName;
+const Io = std.Io;
+const NetStream = Io.net.Stream;
+const Reader = Io.Reader;
 const SmtpClient = @import("Client.zig");
 const TlsClient = std.crypto.tls.Client;
-const Writer = std.Io.Writer;
+const Writer = Io.Writer;
 const Uri = std.Uri;
 
 pub const disable_tls = std.options.http_disable_tls;
@@ -78,7 +80,7 @@ pub const TlsInitError = error{
 } || Allocator.Error || CertificateBundle.RescanError;
 
 /// Connection reads and writes errors.
-pub const ConnectionError = NetStream.ReadError || NetStream.WriteError || error{StreamTooLong} || TlsClient.ReadError;
+pub const ConnectionError = Reader.StreamError || Writer.FileError || error{StreamTooLong} || TlsClient.ReadError;
 
 /// Data structure that represents a SMTP/SMTPs connection.
 ///
@@ -97,9 +99,9 @@ pub const Connection = struct {
     port: u16,
 
     /// Send the close handshake and closes the socket connection.
-    pub fn close(self: *Connection) void {
+    pub fn close(self: *Connection, io: Io) void {
         const stream = self.getStream();
-        defer stream.close();
+        defer stream.close(io);
 
         self.end() catch {};
     }
@@ -119,11 +121,11 @@ pub const Connection = struct {
 
     /// Gets the underlaying socket stream.
     pub fn getStream(self: *Connection) NetStream {
-        return self.stream_reader.getStream();
+        return self.stream_reader.stream;
     }
 
     /// Hostname of the associated connection
-    pub fn hostname(self: *Connection) []const u8 {
+    pub fn hostname(self: *Connection) HostName {
         switch (self.protocol) {
             .smtp => {
                 const smtp: *Smtp = @alignCast(@fieldParentPtr("connection", self));
@@ -157,7 +159,7 @@ pub const Connection = struct {
     /// Gets the reader based on the connection scheme.
     pub fn reader(self: *Connection) *Reader {
         switch (self.protocol) {
-            .smtp => return self.stream_reader.interface(),
+            .smtp => return &self.stream_reader.interface,
             .smtps => {
                 if (disable_tls) unreachable;
 
@@ -199,33 +201,33 @@ pub const Connection = struct {
         /// Creates the connection and the required readers and writers.
         pub fn create(
             client: *SmtpClient,
-            host: []const u8,
+            host: HostName,
             port: u16,
             stream: NetStream,
         ) Allocator.Error!*Smtp {
             const gpa = client.allocator;
-            const allocation_size = getAllocationSize(client, host.len);
+            const allocation_size = getAllocationSize(client, host.bytes.len);
 
             const base = try gpa.alignedAlloc(u8, .of(Smtp), allocation_size);
             errdefer gpa.free(base);
 
-            const host_buffer = base[@sizeOf(Smtp)..][0..host.len];
+            const host_buffer = base[@sizeOf(Smtp)..][0..host.bytes.len];
             const reader_buffer = host_buffer.ptr[host_buffer.len..][0..client.read_buffer_size];
             const writer_buffer = reader_buffer.ptr[reader_buffer.len..][0..client.write_buffer_size];
 
             std.debug.assert(base.ptr + allocation_size == writer_buffer.ptr + writer_buffer.len);
-            @memcpy(host_buffer, host);
+            @memcpy(host_buffer, host.bytes);
 
             const smtp: *Smtp = @ptrCast(base);
 
             smtp.* = .{
                 .connection = .{
                     .client = client,
-                    .host_len = @intCast(host.len),
+                    .host_len = @intCast(host.bytes.len),
                     .port = port,
                     .protocol = .smtp,
-                    .stream_reader = stream.reader(reader_buffer),
-                    .stream_writer = stream.writer(writer_buffer),
+                    .stream_reader = stream.reader(client.io, reader_buffer),
+                    .stream_writer = stream.writer(client.io, writer_buffer),
                 },
             };
 
@@ -246,9 +248,9 @@ pub const Connection = struct {
         }
 
         /// Hostname of the associated connection
-        fn hostname(self: *Smtp) []u8 {
+        fn hostname(self: *Smtp) HostName {
             const base: [*]u8 = @ptrCast(self);
-            return base[@sizeOf(Smtp)..][0..self.connection.host_len];
+            return .{ .bytes = base[@sizeOf(Smtp)..][0..self.connection.host_len] };
         }
     };
 
@@ -263,17 +265,17 @@ pub const Connection = struct {
         /// Leave the host empty if you wish to perform a no_verification check
         pub fn create(
             client: *SmtpClient,
-            host: []const u8,
+            host: HostName,
             port: u16,
             stream: NetStream,
         ) TlsInitError!*Smtps {
             const gpa = client.allocator;
-            const allocation_size = getAllocationSize(client, host.len);
+            const allocation_size = getAllocationSize(client, host.bytes.len);
 
             const base = try gpa.alignedAlloc(u8, .of(Smtps), allocation_size);
             errdefer gpa.free(base);
 
-            const host_buffer = base[@sizeOf(Smtps)..][0..host.len];
+            const host_buffer = base[@sizeOf(Smtps)..][0..host.bytes.len];
 
             const smtps_reader_buffer = host_buffer.ptr[host_buffer.len..][0 .. client.tls_buffer_size + client.read_buffer_size];
             const smtps_writer_buffer = smtps_reader_buffer.ptr[smtps_reader_buffer.len..][0..client.tls_buffer_size];
@@ -282,25 +284,28 @@ pub const Connection = struct {
             const reader_buffer = writer_buffer.ptr[writer_buffer.len..][0..client.tls_buffer_size];
 
             std.debug.assert(base.ptr + allocation_size == reader_buffer.ptr + reader_buffer.len);
-            @memcpy(host_buffer, host);
+            @memcpy(host_buffer, host.bytes);
+
+            var random_buffer: [176]u8 = undefined;
+            std.crypto.random.bytes(&random_buffer);
 
             const smtps: *Smtps = @ptrCast(base);
 
             smtps.* = .{
                 .connection = .{
                     .client = client,
-                    .host_len = @intCast(host.len),
+                    .host_len = @intCast(host.bytes.len),
                     .port = port,
                     .protocol = .smtps,
-                    .stream_reader = stream.reader(smtps_reader_buffer),
-                    .stream_writer = stream.writer(smtps_writer_buffer),
+                    .stream_reader = stream.reader(client.io, smtps_reader_buffer),
+                    .stream_writer = stream.writer(client.io, smtps_writer_buffer),
                 },
 
                 .tls_client = try TlsClient.init(
-                    smtps.connection.stream_reader.interface(),
+                    &smtps.connection.stream_reader.interface,
                     &smtps.connection.stream_writer.interface,
                     .{
-                        .host = if (host.len != 0) .{ .explicit = host } else .no_verification,
+                        .host = if (host.bytes.len != 0) .{ .explicit = host.bytes } else .no_verification,
                         .ca = .{ .bundle = client.ca_bundle },
                         .ssl_key_log = null,
                         .read_buffer = reader_buffer,
@@ -308,6 +313,8 @@ pub const Connection = struct {
                         // This is appropriate for HTTPS because the HTTP headers contain
                         // the content length which is used to detect truncation attacks.
                         .allow_truncation_attacks = true,
+                        .entropy = &random_buffer,
+                        .realtime_now_seconds = (try Io.Clock.real.now(client.io)).toSeconds(),
                     },
                 ),
             };
@@ -329,9 +336,9 @@ pub const Connection = struct {
         }
 
         /// Hostname of the associated connection
-        fn hostname(self: *Smtps) []u8 {
+        fn hostname(self: *Smtps) HostName {
             const base: [*]u8 = @ptrCast(self);
-            return base[@sizeOf(Smtps)..][0..self.connection.host_len];
+            return .{ .bytes = base[@sizeOf(Smtps)..][0..self.connection.host_len] };
         }
     };
 };
